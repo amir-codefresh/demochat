@@ -1,0 +1,5 @@
+ARG owner=default
+ARG image=default
+ARG tag=default
+
+FROM $owner/$image:$tag
