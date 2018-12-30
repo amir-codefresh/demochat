@@ -16,7 +16,7 @@ steps:
       commands:
         #- npm install
         #- npm install -g gulp
-        - npm test
+          - npm test
 
  push_to_registry:
      title: Push To Registry
