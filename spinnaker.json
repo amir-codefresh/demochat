@@ -1,0 +1,15 @@
+{
+    "artifacts": [
+        {
+            "name": "my-file",
+            "type": "s3/object",
+            "reference": "s3://webhook-example-bucket/webhook-example-object.yaml"
+        },
+        {
+            "type": "helm/chart",
+            "name": "external-dns",
+            "reference": "external-dns",
+            "version": "1.4.0"
+        }
+    ]
+}
