@@ -9,7 +9,7 @@ A self-hosted chat app for small teams or big Gal by [Security Compass][seccom].
 [![devDependency Status](https://david-dm.org/sdelements/lets-chat/dev-status.svg)](https://david-dm.org/sdelements/lets-chat#info=devDependencies)
 
 j
-
+a
 ## Features and Stuff
 
 * BYOS (bring your own server)
