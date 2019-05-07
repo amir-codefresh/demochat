@@ -1,0 +1,15 @@
+version: '1.0'
+
+steps:
+  
+  wait:
+    image: codefresh/cli
+    commands:
+      # Get CF pipeline name programaticlly
+      - CF_PIPELINE_NAME=$(codefresh get builds ${{CF_BUILD_ID}}|awk '{print $2}'|egrep -v "PIPELINE-NAME|no available")
+      # Verify if there's already another running build, if so, terminate it
+      - while [ $(codefresh get builds --status=running --pipeline-name=$CF_PIPELINE_NAME -b ${{CF_BRANCH}} |egrep -v "ID|no available"| wc -l) -gt 1 -a $(codefresh get builds --status=running --pipeline-name=$CF_PIPELINE_NAME -b ${{CF_BRANCH}}|egrep -v "ID|no available"|awk 'NR==1{print $1}') = ${{CF_BUILD_ID}} ]; do TERMINATE_BUILD=$(codefresh get builds --status=running --pipeline-name=$CF_PIPELINE_NAME -b ${{CF_BRANCH}}|egrep -v "ID|no available"|awk 'NR==2{print $1}') && echo "terminating build  $TERMINATE_BUILD" && codefresh terminate $TERMINATE_BUILD && sleep 5; done
+  sleep:
+    image: alpine
+    commands:
+      - sleep 60
