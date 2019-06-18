@@ -1,0 +1,283 @@
+version: '1.0'
+stages:
+ - build
+ - publish
+ - deploy
+steps:
+  main_clone:
+    stage: build
+    type: git-clone
+    title: Cloning Git Repo
+    git: CF-default
+    repo: ${{CF_REPO_OWNER}}/${{CF_REPO_NAME}}    
+    revision: ${{CF_REVISION}}
+    
+
+  build_image_sdk:
+    stage: build
+    type: build
+    title: Docker build & pack sdk image
+    dockerfile: Dockerfile
+    description: Building code...
+    working_directory: ${{main_clone}}
+    image_name: broadvoice/messaging.api
+    tag: 'sdk-${{CF_SHORT_REVISION}}'
+    metadata:
+      set:
+        - git_repo: '${{CF_REPO_NAME}}'
+        - git_branch: '${{CF_BRANCH}}'
+        - git_link: '${{CF_COMMIT_URL}}'
+        - git_author: '${{CF_COMMIT_AUTHOR}}'
+        - git_commit_message: '${{CF_COMMIT_MESSAGE}}'
+        - tag: 'sdk-${{CF_SHORT_REVISION}}'
+    build_arguments:
+      - BRANCH=${{CF_BRANCH}}
+      - COMMIT=${{CF_REVISION}}
+      - ASPNETCORE_ENVIRONMENT=${{ASPNETCORE_ENVIRONMENT}}
+    when:
+      branch:
+        only:
+          - master
+          - develop
+          - /^feature\/.*/i
+          - /^bug\/.*/i
+          - /^release\/.*/i
+          - /^hotfix\/.*/i
+        #ignore: [ 'feature/BC-1667' ]
+   
+  compose_test:
+    stage: build
+    type: composition
+    title: Use Docker Compose to run XUnit Tests
+    working_directory: ./test
+    description: Running tests...
+    when:
+      condition:
+        all:
+          releaseMatch: 'match("${{CF_BRANCH}}", "^(develop$|feature|bug|release|hotfix)", true) == true'
+          notSkipTest: 'match("${{CF_COMMIT_MESSAGE}}", "skip\b*([x]?unit\b*|)test", true) == false'
+          notMultiTest: 'match("${{CF_BRANCH}}", "BC-1667", true) == false'
+    composition:
+      version: '3'
+      services:
+        # cassandra 1
+        scylla-node-1:
+          image: "broadvoice/scyllacluster:latest"
+          ports:
+            - 7000
+            - 10000
+            - 9160
+            - 9042
+          volumes:
+            - ${{CF_VOLUME}}:/codefresh/volume          
+          environment:
+            - PROJECTNAME=${{CF_REPO_NAME}}
+            - MEMORY=512M
+          logging:
+            driver: none
+        # cassandra 2
+        scylla-node-2:
+          image: "broadvoice/scyllacluster:latest"
+          ports:
+            - 7000
+            - 10000
+            - 9160
+            - 9042
+          links:
+            - scylla-node-1
+          depends_on:
+            - scylla-node-1
+          environment: 
+            - PRIMARY_NODE=scylla-node-1
+            - MEMORY=512M
+          logging:
+            driver: none
+        # elastic search 1
+        es:
+          image: broadvoice/ci-elasticsearch:latest
+          user: elasticsearch
+          ports:
+            - 9200
+            - 9300
+          environment:
+            - 'discovery.type=single-node'
+            - 'xpack.security.enabled=false'
+            - 'ES_JAVA_OPTS=-Xms300m -Xmx300m'
+            - 'CEREBRO_VER='
+          logging:
+            driver: none
+        # redis 1
+        redis:
+          image: redis:4-alpine
+          ports:
+            - 6379
+          logging:
+            driver: none
+        # rmq 1
+        rmq-1:
+          image: 'broadvoice/ci-messaging-rmq:latest'
+          ports:
+            - 5672
+            - 15672
+          logging:
+            driver: none
+        # asp.net code
+        api:
+          image: ${{build_image_sdk}}
+          environment:
+            - 'ASPNETCORE_URLS=http://*:80'
+            - 'APPLICATION_NAME=Broadvoice.Messaging.API'
+          working_dir: /src
+          entrypoint: ./codefresh-integration-test-entry.sh
+          ports:
+            - 80
+          depends_on:
+            - scylla-node-1
+            - scylla-node-2
+            - es
+            - redis
+            - rmq-1
+          links:
+            - scylla-node-1
+            - scylla-node-2
+            - es
+            - redis
+            - rmq-1
+      volumes:
+        ${{CF_VOLUME}}:
+          external: true
+    composition_candidates:
+      api:
+        image: ${{build_image_sdk}}
+        environment:
+          - 'TESTCONSOLE=Off'
+          - 'ELASTICSEARCH__CONNECTIONSTRING=Hosts=es:9200'
+          - 'CASSANDRASETTINGS__CONNECTIONSTRING=Contact Points=scylla-node-1,scylla-node-2;Port=9042;UseStreamMode=true;KeepAlive=true;MaxSchemaAgreementWaitSeconds=100000;ReuseAddress=true;ConnectTimeoutMillis=180000;QueryTimeoutMillis=180000;ReadTimeoutMillis=180000'
+          - 'REDISCONNECTIONFACTORY__CONNECTIONSTRING=redis:6379,syncTimeout=2500,connectTimeout=8000,configCheckSeconds=15'
+          - 'RABBITMQCONNECTION__CONNECTIONSTRING=amqp://guest:guest@rmq-1:5672/'
+          - 'CONST__PROXYURL=${{CONST_BASEURL}}'
+
+  copy_sdk_artifacts:
+    stage: build
+    title: Share Sdk Artifacts
+    description: Copy artifacts from build sdk step
+    image: ${{build_image_sdk}}
+    working_directory: ${{main_clone}}
+    when:
+      branch:
+        only:
+          - develop
+          - /^feature\/.*/i
+          - /^bug\/.*/i
+          - /^release\/.*/i
+          - /^hotfix\/.*/i
+    commands:
+      - mkdir -p /codefresh/volume/broadvoice.messaging/publish
+      - echo 'Publish content:'
+      - cp -r /Broadvoice/Messaging.API/publish/* /codefresh/volume/broadvoice.messaging/publish
+      - ls /codefresh/volume/broadvoice.messaging/publish
+      - echo 'Copied publish files!!!'
+
+  build_runtime_image:
+    stage: build
+    type: build
+    title: Docker build & pack runtime image
+    dockerfile: Dockerfile.Runtime.Dockerfile
+    description: Building Runtime Image
+    working_directory: ${{main_clone}}
+    image_name: broadvoice/messaging.api
+    tag: 'runtime-${{CF_SHORT_REVISION}}'
+    metadata:
+      set:
+        - git_repo: '${{CF_REPO_NAME}}'
+        - git_branch: '${{CF_BRANCH}}'
+        - git_link: '${{CF_COMMIT_URL}}'
+        - git_author: '${{CF_COMMIT_AUTHOR}}'
+        - git_commit_message: '${{CF_COMMIT_MESSAGE}}'
+        - tag: 'runtime-${{CF_SHORT_REVISION}}'
+    build_arguments:
+      - BRANCH=${{CF_BRANCH}}
+      - COMMIT=${{CF_REVISION}}
+      - ASPNETCORE_ENVIRONMENT=${{ASPNETCORE_ENVIRONMENT}}
+    when:
+      branch:
+        only:
+          - develop
+          - /^feature\/.*/i
+          - /^bug\/.*/i
+          - /^release\/.*/i
+          - /^hotfix\/.*/i
+
+  push_develop_img_dockerhub:
+    stage: publish
+    type: push
+    title: 'Publish Integration Image to DockerHub'
+    candidate: '${{build_runtime_image}}'
+    image_name: broadvoice/messaging.api
+    tags: 
+      - develop
+      - integration
+    registry: dockerhub
+    when:
+      condition:
+        any:
+          developBranch: '"${{CF_BRANCH}}" == "develop"'
+          fakeDevBranch: 'match("${{CF_BRANCH}}", "feature/BC-1667", true) == true'
+
+  push_rc_img_dockerhub:
+    stage: publish
+    type: push
+    title: 'Publish RC/QA Image to Dockerhub'
+    candidate: '${{build_runtime_image}}'
+    image_name: broadvoice/messaging.api
+    tags: 
+      - rc-${{CF_SHORT_REVISION}}
+      - qa
+    registry: dockerhub
+    when:
+      condition:
+        any:
+          releaseMatch: 'match("${{CF_BRANCH}}", "^release\/.*", true) == true'
+          hotfixMatch: 'match("${{CF_BRANCH}}", "^hotfix\/.*", true) == true'
+    
+  deploy_proxmox_dev:
+    stage: deploy
+    title: Deploy to Dev Environment (ProxMox)
+    image: node:latest
+    working_directory: ${{main_clone}}
+    environment:
+      - DOCKER_TAG=${{DOCKER_TAG}}
+      - CONST_BASEURL=${{CONST_BASEURL}}
+      - CONST_BASECLIENTURL=${{CONST_BASECLIENTURL}}
+    commands:
+      - echo "    IdentityFile ~/.ssh/id_rsa" >> /etc/ssh/ssh_config
+      - mkdir -p ~/.ssh; echo ${{SSH_KEY}} | base64 --decode > ~/.ssh/id_rsa; chmod 600 ~/.ssh/id_rsa
+      - sed -i '2iDOCKER_TAG=${{DOCKER_TAG}}' deploy_proxmox.sh
+      #- cat deploy_proxmox.sh
+      #- echo '==========================='
+      - REMOTECOMMAND=$(base64 -w0 deploy_proxmox.sh); ssh -o StrictHostKeyChecking=no -p 23895 user_build@1.tcp.ngrok.io "echo $REMOTECOMMAND | base64 -d | sudo bash"
+    when:
+      condition:
+        any:
+          developBranch: '"${{CF_BRANCH}}" == "develop"'
+          fakeDevBranch: 'match("${{CF_BRANCH}}", "feature/BC-1667", true) == true'
+  
+  deploy_proxmox_qa:
+    stage: deploy
+    title: Deploy to QA Environment (ProxMox)
+    image: node:latest
+    working_directory: ${{main_clone}}
+    environment:
+      - DOCKER_TAG=${{DOCKER_TAG}}
+      - CONST_BASEURL=${{CONST_BASEURL}}
+      - CONST_BASECLIENTURL=${{CONST_BASECLIENTURL}}
+    commands:
+      - echo "    IdentityFile ~/.ssh/id_rsa" >> /etc/ssh/ssh_config
+      - mkdir -p ~/.ssh; echo ${{SSH_KEY}} | base64 --decode > ~/.ssh/id_rsa; chmod 600 ~/.ssh/id_rsa
+      - sed -i '2iDOCKER_TAG=${{DOCKER_TAG}}' deploy_proxmox.sh
+      - REMOTECOMMAND=$(base64 -w0 deploy_proxmox.sh); ssh -o StrictHostKeyChecking=no -p 23896 user_build@1.tcp.ngrok.io "echo $REMOTECOMMAND | base64 -d | sudo bash"
+    when:
+      condition:
+        any:
+          releaseMatch: 'match("${{CF_BRANCH}}", "^release\/.*", true) == true'
+          hotfixMatch: 'match("${{CF_BRANCH}}", "^hotfix\/.*", true) == true'
